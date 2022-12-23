@@ -11,7 +11,9 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
     using System.Security.Claims;
     using System.Threading.Tasks;
     using Microsoft.AspNetCore.Authorization;
+    using Microsoft.Extensions.Logging;
     using Microsoft.Extensions.Options;
+    using Newtonsoft.Json;
 
     /// <summary>
     /// This class is an authorization handler, which handles the authorization requirement.
@@ -20,12 +22,13 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
     {
         private readonly bool disableCreatorUpnCheck;
         private readonly HashSet<string> authorizedCreatorUpnsSet;
+        private readonly ILogger<MustBeValidUpnHandler> logger;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="MustBeValidUpnHandler"/> class.
         /// </summary>
         /// <param name="authenticationOptions">The authentication options.</param>
-        public MustBeValidUpnHandler(IOptions<AuthenticationOptions> authenticationOptions)
+        public MustBeValidUpnHandler(IOptions<AuthenticationOptions> authenticationOptions, ILogger<MustBeValidUpnHandler> logger)
         {
             this.disableCreatorUpnCheck = authenticationOptions.Value.DisableCreatorUpnCheck;
             var authorizedCreatorUpns = authenticationOptions.Value.AuthorizedCreatorUpns;
@@ -34,6 +37,7 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
                 ?.Select(p => p.Trim())
                 ?.ToHashSet()
                 ?? new HashSet<string>();
+            this.logger = logger;
         }
 
         /// <summary>
@@ -62,6 +66,7 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
         /// <returns>Indicate if a upn is valid or not.</returns>
         private bool IsValidUpn(AuthorizationHandlerContext context)
         {
+            this.logger.LogInformation(JsonConvert.SerializeObject(context.User?.Claims?.Select(x => (x.Type, x.Value))));
             var claimupn = context.User?.Claims?.FirstOrDefault(p => p.Type == ClaimTypes.Upn);
             var upn = claimupn?.Value;
 
