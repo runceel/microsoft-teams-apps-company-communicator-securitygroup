@@ -7,7 +7,6 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
 {
     using System;
     using System.Collections.Generic;
-    using System.IdentityModel.Tokens.Jwt;
     using System.Linq;
     using System.Security.Claims;
     using System.Threading.Tasks;
@@ -15,8 +14,6 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
     using Microsoft.Extensions.Logging;
     using Microsoft.Extensions.Options;
     using Microsoft.Graph;
-    using Microsoft.Identity.Web;
-    using Newtonsoft.Json;
 
     /// <summary>
     /// This class is an authorization handler, which handles the authorization requirement.
@@ -24,9 +21,8 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
     public class MustBeValidUpnOrSecurityGroupHandler : AuthorizationHandler<MustBeValidUpnOrSecurityGroupRequirement>
     {
         private readonly bool disableCreatorUpnCheck;
-        private string[] securityGroupIds;
+        private readonly string[] securityGroupIds;
         private readonly HashSet<string> authorizedCreatorUpnsSet;
-        private readonly ILogger<MustBeValidUpnOrSecurityGroupHandler> logger;
         private readonly IGraphServiceClient graphServiceClient;
 
         /// <summary>
@@ -43,6 +39,7 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
             var authorizedCreatorUpns = authenticationOptions.Value.AuthorizedCreatorUpns;
             if (Guid.TryParse(authorizedCreatorUpns, out var _))
             {
+                this.authorizedCreatorUpnsSet = null;
                 this.securityGroupIds = new[] { authorizedCreatorUpns };
             }
             else
@@ -52,8 +49,8 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
                     ?.Select(p => p.Trim())
                     ?.ToHashSet()
                     ?? new HashSet<string>();
+                this.securityGroupIds = null;
             }
-            this.logger = logger;
             this.graphServiceClient = graphServiceClient;
         }
 
@@ -73,13 +70,13 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
             {
                 context.Succeed(requirement);
             } 
-            else if (this.securityGroupIds != null && await this.IsMemverOfSecurityGroupAsync())
+            else if (this.securityGroupIds != null && await this.IsMemberOfSecurityGroupAsync())
             {
                 context.Succeed(requirement);
             }
         }
 
-        private async Task<bool> IsMemverOfSecurityGroupAsync()
+        private async Task<bool> IsMemberOfSecurityGroupAsync()
         {
             var memberGroups = await this.graphServiceClient.Me.CheckMemberGroups(this.securityGroupIds).Request().PostAsync();
             return memberGroups.Any();
