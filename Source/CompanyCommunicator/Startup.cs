@@ -148,6 +148,9 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator
             services.AddBlobClient(useManagedIdentity);
             services.AddServiceBusClient(useManagedIdentity);
 
+            // cache
+            services.AddMemoryCache();
+
             // The bot needs an HttpClient to download and upload files.
             services.AddHttpClient();
 

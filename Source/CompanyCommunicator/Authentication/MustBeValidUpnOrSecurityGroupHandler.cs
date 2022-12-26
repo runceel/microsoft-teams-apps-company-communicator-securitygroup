@@ -11,7 +11,7 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
     using System.Security.Claims;
     using System.Threading.Tasks;
     using Microsoft.AspNetCore.Authorization;
-    using Microsoft.Extensions.Logging;
+    using Microsoft.Extensions.Caching.Memory;
     using Microsoft.Extensions.Options;
     using Microsoft.Graph;
 
@@ -21,9 +21,7 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
     public class MustBeValidUpnOrSecurityGroupHandler : AuthorizationHandler<MustBeValidUpnOrSecurityGroupRequirement>
     {
         private readonly bool disableCreatorUpnCheck;
-        private readonly string[] securityGroupIds;
-        private readonly HashSet<string> authorizedCreatorUpnsSet;
-        private readonly IGraphServiceClient graphServiceClient;
+        private readonly IInnerHandler innerHandler;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="MustBeValidUpnOrSecurityGroupHandler"/> class.
@@ -31,27 +29,30 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
         /// <param name="authenticationOptions">The authentication options.</param>
         /// <param name="logger">logger.</param>
         /// <param name="graphServiceClient">graph service client.</param>
-        public MustBeValidUpnOrSecurityGroupHandler(IOptions<AuthenticationOptions> authenticationOptions, 
-            ILogger<MustBeValidUpnOrSecurityGroupHandler> logger,
-            IGraphServiceClient graphServiceClient)
+        /// <param name="cache">The cache.</param>
+        public MustBeValidUpnOrSecurityGroupHandler(
+            IOptions<AuthenticationOptions> authenticationOptions,
+            IGraphServiceClient graphServiceClient,
+            IMemoryCache cache)
         {
             this.disableCreatorUpnCheck = authenticationOptions.Value.DisableCreatorUpnCheck;
             var authorizedCreatorUpns = authenticationOptions.Value.AuthorizedCreatorUpns;
-            if (Guid.TryParse(authorizedCreatorUpns, out var _))
-            {
-                this.authorizedCreatorUpnsSet = null;
-                this.securityGroupIds = new[] { authorizedCreatorUpns };
-            }
-            else
-            {
-                this.authorizedCreatorUpnsSet = authorizedCreatorUpns
-                    ?.Split(new char[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
-                    ?.Select(p => p.Trim())
-                    ?.ToHashSet()
-                    ?? new HashSet<string>();
-                this.securityGroupIds = null;
-            }
-            this.graphServiceClient = graphServiceClient;
+            this.innerHandler = Guid.TryParse(authorizedCreatorUpns, out var _) ?
+                (IInnerHandler)new MemberOfSecurityGroupInnerHandler(authorizedCreatorUpns, cache, graphServiceClient) :
+                new MemberOfAuthorizedCreatorUpnsInnerHandler(authorizedCreatorUpns);
+        }
+
+        /// <summary>
+        /// Inner handler for HandleRequirementAsync
+        /// </summary>
+        private interface IInnerHandler
+        {
+            /// <summary>
+            /// Inner handler.
+            /// </summary>
+            /// <param name="upn">The upn.</param>
+            /// <returns>valid or invalid</returns>
+            Task<bool> HandleRequirementAsync(string upn);
         }
 
         /// <summary>
@@ -64,54 +65,66 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
             AuthorizationHandlerContext context,
             MustBeValidUpnOrSecurityGroupRequirement requirement)
         {
-            if (this.disableCreatorUpnCheck) return;
+            if (this.disableCreatorUpnCheck) { return; }
 
-            if (this.authorizedCreatorUpnsSet != null && this.IsValidUpn(context))
+            var upn = GetUpnOrEmailFromContext(context);
+            if (string.IsNullOrWhiteSpace(upn))
             {
-                context.Succeed(requirement);
-            } 
-            else if (this.securityGroupIds != null && await this.IsMemberOfSecurityGroupAsync())
+                return;
+            }
+
+            if (await this.innerHandler.HandleRequirementAsync(upn))
             {
                 context.Succeed(requirement);
             }
         }
 
-        private async Task<bool> IsMemberOfSecurityGroupAsync()
-        {
-            var memberGroups = await this.graphServiceClient.Me.CheckMemberGroups(this.securityGroupIds).Request().PostAsync();
-            return memberGroups.Any();
-        }
-
-        /// <summary>
-        /// Check whether a upn (or alternate email for external authors) is valid or not.
-        /// This is where we should check against the valid list of UPNs.
-        /// </summary>
-        /// <param name="context">Authorization handler context instance.</param>
-        /// <returns>Indicate if a upn is valid or not.</returns>
-        private bool IsValidUpn(AuthorizationHandlerContext context)
+        private static string GetUpnOrEmailFromContext(AuthorizationHandlerContext context)
         {
             var claimupn = context.User?.Claims?.FirstOrDefault(p => p.Type == ClaimTypes.Upn);
             var upn = claimupn?.Value;
 
             var claimemail = context.User?.Claims?.FirstOrDefault(p => p.Type == ClaimTypes.Email);
             var email = claimemail?.Value;
+            return upn ?? email;
+        }
 
-            if (string.IsNullOrWhiteSpace(upn) && string.IsNullOrWhiteSpace(email))
+        private class MemberOfAuthorizedCreatorUpnsInnerHandler : IInnerHandler
+        {
+            private readonly HashSet<string> authorizedCreatorUpnsSet;
+
+            public MemberOfAuthorizedCreatorUpnsInnerHandler(string authorizedCreatorUpns)
             {
-                return false;
+                this.authorizedCreatorUpnsSet = authorizedCreatorUpns
+                    ?.Split(new char[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    ?.Select(p => p.Trim())
+                    ?.ToHashSet()
+                    ?? new HashSet<string>();
             }
 
-            bool upncheck = this.authorizedCreatorUpnsSet.Contains(upn, StringComparer.OrdinalIgnoreCase);
-            bool emailcheck = this.authorizedCreatorUpnsSet.Contains(email, StringComparer.OrdinalIgnoreCase);
+            public Task<bool> HandleRequirementAsync(string upn) => Task.FromResult(this.authorizedCreatorUpnsSet.Contains(upn, StringComparer.OrdinalIgnoreCase));
+        }
 
-            if (upncheck || emailcheck)
+        private class MemberOfSecurityGroupInnerHandler : IInnerHandler
+        {
+            private readonly string[] securityGroupIds;
+            private readonly IMemoryCache memoryCache;
+            private readonly IGraphServiceClient graphServiceClient;
+
+            public MemberOfSecurityGroupInnerHandler(string securityGroupId, IMemoryCache memoryCache, IGraphServiceClient graphServiceClient)
             {
-                return true;
+                this.securityGroupIds = new[] { securityGroupId };
+                this.memoryCache = memoryCache;
+                this.graphServiceClient = graphServiceClient;
             }
-            else
-            {
-                return false;
-            }
+
+            public async Task<bool> HandleRequirementAsync(string upn) =>
+                await this.memoryCache.GetOrCreateAsync(upn, async entry =>
+                {
+                    entry.SlidingExpiration = TimeSpan.FromMinutes(5);
+                    var memberGroups = await this.graphServiceClient.Me.CheckMemberGroups(this.securityGroupIds).Request().PostAsync();
+                    return memberGroups.Any();
+                });
         }
     }
 }
