@@ -121,7 +121,7 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
             public async Task<bool> HandleRequirementAsync(string upn) =>
                 await this.memoryCache.GetOrCreateAsync(upn, async entry =>
                 {
-                    entry.SlidingExpiration = TimeSpan.FromMinutes(5);
+                    entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(15);
                     var memberGroups = await this.graphServiceClient.Me.CheckMemberGroups(this.securityGroupIds).Request().PostAsync();
                     return memberGroups.Any();
                 });
