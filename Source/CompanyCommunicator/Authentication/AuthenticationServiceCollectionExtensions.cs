@@ -177,7 +177,7 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
             var graphGroupDatascope = configuration.GetValue<string>("GroupsGraphScope");
             services.AddAuthorization(options =>
             {
-                var mustContainUpnClaimRequirement = new MustBeValidUpnRequirement();
+                var mustContainUpnClaimRequirement = new MustBeValidUpnOrSecurityGroupRequirement();
                 options.AddPolicy(
                     PolicyNames.MustBeValidUpnPolicy,
                     policyBuilder => policyBuilder
@@ -192,7 +192,7 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
                     .Build());
             });
 
-            services.AddScoped<IAuthorizationHandler, MustBeValidUpnHandler>();
+            services.AddScoped<IAuthorizationHandler, MustBeValidUpnOrSecurityGroupHandler>();
             services.AddScoped<IAuthorizationHandler, MSGraphScopeHandler>();
         }
 

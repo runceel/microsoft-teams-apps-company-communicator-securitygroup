@@ -7,37 +7,54 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
 {
     using System;
     using System.Collections.Generic;
+    using System.IdentityModel.Tokens.Jwt;
     using System.Linq;
     using System.Security.Claims;
     using System.Threading.Tasks;
     using Microsoft.AspNetCore.Authorization;
     using Microsoft.Extensions.Logging;
     using Microsoft.Extensions.Options;
+    using Microsoft.Graph;
+    using Microsoft.Identity.Web;
     using Newtonsoft.Json;
 
     /// <summary>
     /// This class is an authorization handler, which handles the authorization requirement.
     /// </summary>
-    public class MustBeValidUpnHandler : AuthorizationHandler<MustBeValidUpnRequirement>
+    public class MustBeValidUpnOrSecurityGroupHandler : AuthorizationHandler<MustBeValidUpnOrSecurityGroupRequirement>
     {
         private readonly bool disableCreatorUpnCheck;
+        private string[] securityGroupIds;
         private readonly HashSet<string> authorizedCreatorUpnsSet;
-        private readonly ILogger<MustBeValidUpnHandler> logger;
+        private readonly ILogger<MustBeValidUpnOrSecurityGroupHandler> logger;
+        private readonly IGraphServiceClient graphServiceClient;
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="MustBeValidUpnHandler"/> class.
+        /// Initializes a new instance of the <see cref="MustBeValidUpnOrSecurityGroupHandler"/> class.
         /// </summary>
         /// <param name="authenticationOptions">The authentication options.</param>
-        public MustBeValidUpnHandler(IOptions<AuthenticationOptions> authenticationOptions, ILogger<MustBeValidUpnHandler> logger)
+        /// <param name="logger">logger.</param>
+        /// <param name="graphServiceClient">graph service client.</param>
+        public MustBeValidUpnOrSecurityGroupHandler(IOptions<AuthenticationOptions> authenticationOptions, 
+            ILogger<MustBeValidUpnOrSecurityGroupHandler> logger,
+            IGraphServiceClient graphServiceClient)
         {
             this.disableCreatorUpnCheck = authenticationOptions.Value.DisableCreatorUpnCheck;
             var authorizedCreatorUpns = authenticationOptions.Value.AuthorizedCreatorUpns;
-            this.authorizedCreatorUpnsSet = authorizedCreatorUpns
-                ?.Split(new char[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
-                ?.Select(p => p.Trim())
-                ?.ToHashSet()
-                ?? new HashSet<string>();
+            if (Guid.TryParse(authorizedCreatorUpns, out var _))
+            {
+                this.securityGroupIds = new[] { authorizedCreatorUpns };
+            }
+            else
+            {
+                this.authorizedCreatorUpnsSet = authorizedCreatorUpns
+                    ?.Split(new char[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    ?.Select(p => p.Trim())
+                    ?.ToHashSet()
+                    ?? new HashSet<string>();
+            }
             this.logger = logger;
+            this.graphServiceClient = graphServiceClient;
         }
 
         /// <summary>
@@ -46,16 +63,26 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
         /// <param name="context">AuthorizationHandlerContext instance.</param>
         /// <param name="requirement">IAuthorizationRequirement instance.</param>
         /// <returns>A task that represents the work queued to execute.</returns>
-        protected override Task HandleRequirementAsync(
+        protected override async Task HandleRequirementAsync(
             AuthorizationHandlerContext context,
-            MustBeValidUpnRequirement requirement)
+            MustBeValidUpnOrSecurityGroupRequirement requirement)
         {
-            if (this.disableCreatorUpnCheck || this.IsValidUpn(context))
+            if (this.disableCreatorUpnCheck) return;
+
+            if (this.authorizedCreatorUpnsSet != null && this.IsValidUpn(context))
+            {
+                context.Succeed(requirement);
+            } 
+            else if (this.securityGroupIds != null && await this.IsMemverOfSecurityGroupAsync())
             {
                 context.Succeed(requirement);
             }
+        }
 
-            return Task.CompletedTask;
+        private async Task<bool> IsMemverOfSecurityGroupAsync()
+        {
+            var memberGroups = await this.graphServiceClient.Me.CheckMemberGroups(this.securityGroupIds).Request().PostAsync();
+            return memberGroups.Any();
         }
 
         /// <summary>
@@ -66,7 +93,6 @@ namespace Microsoft.Teams.Apps.CompanyCommunicator.Authentication
         /// <returns>Indicate if a upn is valid or not.</returns>
         private bool IsValidUpn(AuthorizationHandlerContext context)
         {
-            this.logger.LogInformation(JsonConvert.SerializeObject(context.User?.Claims?.Select(x => (x.Type, x.Value))));
             var claimupn = context.User?.Claims?.FirstOrDefault(p => p.Type == ClaimTypes.Upn);
             var upn = claimupn?.Value;
 
